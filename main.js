@@ -279,6 +279,23 @@
   }
   $('newProjectBtn').onclick = () => openProjectDialog();
   $('exploreBtn').onclick = () => $('labs').scrollIntoView({ behavior: UI.reduced ? 'auto' : 'smooth' });
+  // แชร์ลิงก์หน้าหลัก: คนที่เปิดลิงก์จะเข้าเป็นผู้เยี่ยมชมได้ทันที (ต้องเปิดเว็บผ่าน http/https เช่น GitHub Pages)
+  $('shareBtn').onclick = async () => {
+    const url = new URL('index.html', location.href);
+    url.search = Store.config.allowGuest ? '?guest=1' : '';
+    url.hash = '';
+    const link = url.href;
+    if (navigator.share) {
+      try { await navigator.share({ title: document.title, url: link }); return; }
+      catch (e) { if (e && e.name === 'AbortError') return; }
+    }
+    try {
+      await navigator.clipboard.writeText(link);
+      UI.toast('คัดลอกลิงก์แล้ว ส่งให้คนอื่นเปิดได้เลย', 'ok');
+    } catch (e) {
+      window.prompt('คัดลอกลิงก์นี้ไปแชร์', link);
+    }
+  };
   $('projectForm').addEventListener('submit', async e => {
     e.preventDefault();
     const name = $('projectName').value.trim();
