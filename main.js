@@ -164,10 +164,20 @@
       requestAnimationFrame(step);
     });
   }
+  // หยุดเล่นเมื่อแผนผังไม่อยู่บนจอ เพื่อไม่ให้เครื่องทำงานเปล่าๆ (มือถือจะลื่นขึ้น)
+  let topoOnScreen = true, resumeTopo = null;
+  if ('IntersectionObserver' in window) {
+    new IntersectionObserver(([e]) => {
+      topoOnScreen = e.isIntersecting;
+      if (topoOnScreen && resumeTopo) { resumeTopo(); resumeTopo = null; }
+    }).observe(svg);
+  }
+  const whenTopoVisible = () => (topoOnScreen ? null : new Promise(r => { resumeTopo = r; }));
   async function playStory() {
     if (UI.reduced) { setCaption(STORY[4][0], STORY[4][1]); return; }
     for (;;) {
       for (const [proto, text, hops] of STORY) {
+        await whenTopoVisible();
         setCaption(proto, text);
         await Promise.all(hops.map(hp => fly(hp, COLORS[proto], 900)));
         await UI.wait(650);
@@ -489,6 +499,10 @@
     }
   }
   buildOrbit();
+  if ('IntersectionObserver' in window) {
+    const orbit = $('orbit');
+    new IntersectionObserver(([e]) => orbit.classList.toggle('is-off', !e.isIntersecting)).observe(orbit);
+  }
 
   /* ------------------ กระจก: ประกายแสงตามเมาส์ + การ์ดเอียง 3D ------------------ */
   const canHover = window.matchMedia('(hover: hover)').matches && !UI.reduced;
