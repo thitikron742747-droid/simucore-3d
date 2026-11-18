@@ -141,7 +141,12 @@
 .glass-theme .hero__facts div { padding: 12px 18px; border-radius: 18px; min-width: 112px; color: var(--g-muted); }
 .glass-theme .hero__facts b { font-size: 30px; background: linear-gradient(120deg, #fff, #b9f4ff); -webkit-background-clip: text; background-clip: text; color: transparent; }
 
-.orbit { position: relative; height: 500px; min-width: 0; perspective: 1200px; }
+.orbit {
+  position: relative; height: 500px; min-width: 0; perspective: 1200px;
+  /* ตัดส่วนที่ล้นของวงโคจรที่หมุนอยู่ ไม่ให้ความกว้างหน้าเว็บเปลี่ยนตลอดเวลา
+     (บนมือถือ/แท็บเล็ตจะทำให้หน้าซูมเข้าออกจนดูกระพริบ) */
+  overflow: hidden; overflow: clip;
+}
 .orbit__scene {
   --tx: -8deg; --ty: 0deg;
   /* วางแบบ absolute เพื่อไม่ให้ฉากขนาด 460px ดันความกว้างของหน้าบนจอเล็ก */
@@ -315,6 +320,12 @@
   .orbit__scene { transform: scale(0.66) rotateX(var(--tx)) rotateY(var(--ty)); }
   .glass-theme .labs { grid-template-columns: 1fr; }
   .glass-theme .lab__side { grid-column: auto; }
+}
+
+/* จอสัมผัส (มือถือ/แท็บเล็ต): หยุดก้อนสีพื้นหลังไม่ให้ขยับ เพราะกระจกเบลอหลายชั้น
+   ต้องคำนวณใหม่ทุกเฟรมเมื่อพื้นหลังขยับ ทำให้เครื่องหนักและจอกระพริบ */
+@media (hover: none), (max-width: 900px) {
+  .aurora i { animation: none; will-change: auto; }
 }
 
 @media (prefers-reduced-motion: reduce) {
