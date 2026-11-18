@@ -2,7 +2,6 @@
    SimuCore 3D — ธีม Liquid Glass (หน้าหลัก + หน้าเข้าสู่ระบบ)
    ใช้กับ <body class="glass-theme"> โหลดหลัง style.css
    ========================================================================== */
-@property --spin { syntax: '<angle>'; inherits: true; initial-value: 0deg; }
 @property --ang { syntax: '<angle>'; inherits: false; initial-value: 0deg; }
 
 .glass-theme {
@@ -179,9 +178,16 @@
   position: absolute; left: 50%; top: 50%; width: 0; height: 0; transform-style: preserve-3d;
   transform: rotateY(var(--b)) rotateX(var(--a));
 }
-.ring__spin { position: absolute; inset: 0; transform-style: preserve-3d; transform: rotateZ(var(--spin)); animation: ring-spin var(--dur) linear infinite; }
-.ring--rev .ring__spin { animation-direction: reverse; }
-@keyframes ring-spin { to { --spin: 360deg; } }
+/* หมุนด้วย transform ล้วน ให้การ์ดจอทำงานแทน CPU (เดิมหมุนผ่านตัวแปร --spin
+   ซึ่งต้องคำนวณสไตล์ใหม่ทุกเฟรม ทำให้มือถือหน่วง) */
+.ring__spin { position: absolute; inset: 0; transform-style: preserve-3d; transform: rotateZ(0deg); animation: ring-spin var(--dur) linear infinite; }
+.ring--rev .ring__spin, .ring--rev .sat__face { animation-direction: reverse; }
+@keyframes ring-spin { to { transform: rotateZ(360deg); } }
+/* ป้ายดาวเทียมหมุนสวนทางวงโคจรด้วยความเร็วเท่ากัน จึงหันหน้าเข้าหากล้องตลอด */
+@keyframes face-spin {
+  from { transform: rotateZ(calc(var(--p) * -1)) rotateX(calc(var(--a) * -1)) rotateY(calc(var(--b) * -1)); }
+  to { transform: rotateZ(calc((var(--p) + 360deg) * -1)) rotateX(calc(var(--a) * -1)) rotateY(calc(var(--b) * -1)); }
+}
 .ring__track {
   position: absolute; left: calc(var(--r) * -1); top: calc(var(--r) * -1); width: calc(var(--r) * 2); height: calc(var(--r) * 2);
   border-radius: 50%; border: 1.5px solid rgba(255, 255, 255, 0.22);
@@ -193,7 +199,8 @@
 .sat__face {
   position: absolute; left: -26px; top: -26px; width: 52px; height: 52px; border-radius: 16px;
   display: grid; place-items: center; font-size: 20px; color: #fff;
-  transform: rotateZ(calc((var(--p) + var(--spin)) * -1)) rotateX(calc(var(--a) * -1)) rotateY(calc(var(--b) * -1));
+  transform: rotateZ(calc(var(--p) * -1)) rotateX(calc(var(--a) * -1)) rotateY(calc(var(--b) * -1));
+  animation: face-spin var(--dur) linear infinite;
   /* ไม่ใช้ backdrop-filter ในฉาก 3D เพราะทำให้เบราว์เซอร์เรียงลำดับหน้า-หลังผิด */
   background: linear-gradient(140deg, rgba(120, 140, 255, 0.42), rgba(20, 26, 70, 0.78));
   border: 1.5px solid color-mix(in srgb, var(--glow, #22d3ee) 70%, #fff);
@@ -235,8 +242,9 @@
 .lab__glow { position: absolute; inset: -1px; border-radius: inherit; padding: 1.5px; pointer-events: none; opacity: 0; transition: opacity 0.35s;
   background: conic-gradient(from var(--ang), transparent 0 55%, var(--accent) 70%, #fff 76%, var(--c-pink) 82%, transparent 92%);
   -webkit-mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0); -webkit-mask-composite: xor; mask-composite: exclude;
-  animation: ang 3.2s linear infinite; }
-.glass-theme .lab:hover .lab__glow { opacity: 1; }
+  animation: ang 3.2s linear infinite paused; }
+/* หมุนเฉพาะตอนชี้เมาส์ ไม่งั้นการ์ดทุกใบต้องวาดใหม่ทุกเฟรมทั้งที่มองไม่เห็น */
+.glass-theme .lab:hover .lab__glow { opacity: 1; animation-play-state: running; }
 @keyframes ang { to { --ang: 360deg; } }
 .lab__top { display: flex; align-items: center; justify-content: space-between; margin-bottom: 18px; transform: translateZ(30px); }
 .lab__icon {
@@ -326,10 +334,22 @@
    ต้องคำนวณใหม่ทุกเฟรมเมื่อพื้นหลังขยับ ทำให้เครื่องหนักและจอกระพริบ */
 @media (hover: none), (max-width: 900px) {
   .aurora i { animation: none; will-change: auto; }
+  /* การ์ดวางบนพื้นหลังสีไล่เฉดที่นิ่งอยู่แล้ว เบลอไปก็แทบไม่ต่าง จึงใช้พื้นทึบขึ้นแทน
+     เหลือเบลอเฉพาะแถบด้านบน/เมนูล่างที่ลอยทับเนื้อหาตอนเลื่อน */
+  .glass-theme .glass,
+  .glass-theme .projects,
+  .glass-theme .hs {
+    -webkit-backdrop-filter: none; backdrop-filter: none;
+    background: linear-gradient(140deg, rgba(58, 68, 128, 0.5), rgba(22, 27, 64, 0.62) 55%, rgba(40, 46, 98, 0.55));
+  }
+  .glass-theme .topbar,
+  .glass-theme .sidenav { -webkit-backdrop-filter: blur(14px); backdrop-filter: blur(14px); }
 }
+/* หยุดแอนิเมชันในฉากที่เลื่อนพ้นจอไปแล้ว (ตั้งคลาสจาก main.js) */
+.orbit.is-off *, .orbit.is-off *::before { animation-play-state: paused !important; }
 
 @media (prefers-reduced-motion: reduce) {
-  .aurora i, .core__orb, .core__orb::before, .core__halo, .ring__spin, .lab__glow, .glass-theme .hero h1 .grad { animation: none !important; }
+  .aurora i, .core__orb, .core__orb::before, .core__halo, .ring__spin, .sat__face, .lab__glow, .glass-theme .hero h1 .grad { animation: none !important; }
   .glass-theme .lab { transform: none !important; }
 }
 
