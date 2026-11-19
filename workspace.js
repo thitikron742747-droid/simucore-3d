@@ -149,12 +149,16 @@ const roomSize = () => SITES[$('roomSizeSelect').value] || SITES.medium;
 const siteZones = () => (roomSize().zones || []);
 let currentZone = null;               // ห้อง/อาคารที่กำลังดูอยู่ (อุปกรณ์ใหม่จะวางในนี้)
 function zoneAt(x, z) {
+  const site = roomSize();
+  if (site.model && window.SiteModel) { const i = SiteModel.zoneIndexAt(site.desc, x, z); return i >= 0 ? site.zones[i] || null : null; }
+  if (site.zoneGrid && window.PlanScan) { const i = PlanScan.zoneIndexAt(site, x, z); return i >= 0 ? site.zones[i] || null : null; }
   const zs = siteZones();
   return zs.find(q => !q.corridor && Math.abs(x - q.x) <= q.w / 2 && Math.abs(z - q.z) <= q.l / 2)
     || zs.find(q => Math.abs(x - q.x) <= q.w / 2 && Math.abs(z - q.z) <= q.l / 2) || null;
 }
 const maxOrbit = () => Math.max(40, Math.max(roomSize().w, roomSize().l) * 1.9);
-let sunLight = null;
+let sunLight = null, ambLight = null, glowLight = null, hemiLight = null, baseEnv = null;
+let campusView = null;                // ฉากผังบริเวณที่สร้างด้วย SiteRender (วิทยาลัย/วิทยาเขตจริง)
 let siteWalls = [];                   // ส่วนผนัง [x1,z1,x2,z2] ใช้ชนตอนเดินโหมด 360°
 const devOf = id => net.devices.get(Number(id));
 const catOf = id => NetSim.CATEGORIES.find(c => c.id === id);
@@ -201,7 +205,8 @@ async function init3D() {
   controls.minDistance = 2;
   controls.maxDistance = 40;
 
-  scene.add(new THREE.AmbientLight(0xffffff, 0.75));
+  ambLight = new THREE.AmbientLight(0xffffff, 0.75);
+  scene.add(ambLight);
   const dirLight = sunLight = new THREE.DirectionalLight(0xffffff, 0.8);
   dirLight.position.set(8, 16, 10);
   dirLight.castShadow = true;
@@ -209,9 +214,11 @@ async function init3D() {
   Object.assign(dirLight.shadow.camera, { left: -10, right: 10, top: 10, bottom: -10, near: 1, far: 40 });
   dirLight.shadow.camera.updateProjectionMatrix();
   scene.add(dirLight);
-  const glow = new THREE.PointLight(GLASS ? 0xa855f7 : 0x00f0ff, GLASS ? 0.8 : 0.6, 18);
+  if (dirLight.target) scene.add(dirLight.target);
+  const glow = glowLight = new THREE.PointLight(GLASS ? 0xa855f7 : 0x00f0ff, GLASS ? 0.8 : 0.6, 18);
   glow.position.set(0, WALL_H - 0.4, 0);
   scene.add(glow);
+  baseEnv = { fog: scene.fog, background: scene.background };
 
   const ringGeo = new THREE.RingGeometry(0.92, 1.02, 48);
   selRing = new THREE.Mesh(ringGeo, new THREE.MeshBasicMaterial({ color: 0x00f0ff, transparent: true, opacity: 0.9, side: THREE.DoubleSide }));
@@ -314,13 +321,14 @@ function buildRoom() {
   const floorType = $('floorTextureSelect').value;
   if (roomGroup) { scene.remove(roomGroup); disposeTree(roomGroup); }
   net.scale = site.scale || 1;
-  net.walls = (site.walls || []).map(w => [w[0], w[1], w[2], w[3], site.wallLoss || 5]);   // ผนังลดสัญญาณ Wi-Fi
+  net.walls = (site.walls || []).map(w => [w[0], w[1], w[2], w[3], w[4] !== undefined && (site.scan || site.model) ? w[4] : site.wallLoss || 5]);   // ผนังลดสัญญาณ Wi-Fi (แผนผังที่สแกน: ปูน 10 / ผนังเบา 6 / หน้าต่าง 2 dB)
   net.syncWireless();     // ผนัง/ระยะเปลี่ยน → ตรวจการเชื่อมต่อ Wi-Fi ใหม่
   lastSiteKey = $('roomSizeSelect').value;
   siteWalls = [];
   // ฉากใหญ่: ปรับหมอก เงา และระยะซูมให้พอดีพื้นที่
   const span = Math.max(w, l);
-  if (scene.fog) scene.fog.density = (GLASS ? 0.008 : 0.016) * Math.min(1, 12 / span);
+  applyEnvironment(site);
+  if (scene.fog && scene.fog.isFogExp2 !== false && !site.model) scene.fog.density = (GLASS ? 0.008 : 0.016) * Math.min(1, 12 / span);
   if (sunLight) {
     const r = Math.max(10, span * 0.6);
     Object.assign(sunLight.shadow.camera, { left: -r, right: r, top: r, bottom: -r, far: Math.max(40, span * 1.5) });
@@ -328,6 +336,14 @@ function buildRoom() {
     sunLight.shadow.camera.updateProjectionMatrix();
   }
   if (controls && viewMode === '3d') controls.maxDistance = maxOrbit();
+  campusView = null;
+  if (site.model) {
+    if (!currentZone || !site.zones.includes(currentZone)) currentZone = defaultZone(site);
+    roomGroup = buildCampus(site);
+    scene.add(roomGroup);
+    renderZoneNav();
+    return;
+  }
   if (site.zones) {
     if (!currentZone || !site.zones.includes(currentZone)) currentZone = site.zones[0];
     roomGroup = buildSite(site, floorType);
@@ -465,8 +481,27 @@ function buildSite(site, floorType) {
     group.add(base);
   }
 
+  // แผนผังที่สแกน: ใช้ภาพแผนผังเป็นพื้น (ตำแหน่งตรงกับผนังทุกเส้น)
+  if (site.scan) {
+    const tex = scanFloorTexture(site);
+    const floorPlane = new THREE.Mesh(new THREE.PlaneGeometry(site.floorW, site.floorL), tex
+      ? new THREE.MeshBasicMaterial({ map: tex, transparent: site.plan && site.plan.style !== 'photo', opacity: site.plan && site.plan.style === 'photo' ? 1 : 0.96, depthWrite: false })
+      : new THREE.MeshBasicMaterial({ color: 0x1a2154, transparent: true, opacity: 0.6, depthWrite: false }));
+    floorPlane.rotation.x = -Math.PI / 2;
+    floorPlane.position.y = 0.003;
+    floorPlane.renderOrder = -1;
+    group.add(floorPlane);
+  }
   // พื้นของแต่ละห้อง/อาคาร: พื้นจริง + แผ่นสีประจำห้องจางๆ + เส้นตาราง
   for (const z of site.zones) {
+    if (site.scan) {
+      if (!z.corridor) {
+        const label = zoneLabel(z.name, z.color, false);
+        label.position.set(z.lx, WALL_H + 0.45, z.lz);
+        group.add(label);
+      }
+      continue;
+    }
     if (campus) {
       const slab = new THREE.Mesh(new THREE.BoxGeometry(z.w, 0.2, z.l), floorMat());
       slab.position.set(z.x, -0.1, z.z);
@@ -497,7 +532,10 @@ function buildSite(site, floorType) {
     ? new THREE.MeshStandardMaterial({ color: 0x9fb4ff, roughness: 0.15, metalness: 0.2, transparent: true, opacity: 0.1, depthWrite: false, side: THREE.DoubleSide })
     : new THREE.MeshStandardMaterial({ color: 0x16203a, roughness: 0.9, transparent: true, opacity: 0.85, side: THREE.DoubleSide });
   const stripMats = [0x22d3ee, 0xec4899, 0xa855f7, 0x34d399].map(c => new THREE.MeshBasicMaterial({ color: c, side: THREE.DoubleSide }));
-  site.walls.forEach(([x1, z1, x2, z2], i) => {
+  if (site.solid) {
+    buildSolidWalls(group, site);
+    siteWalls = site.walls;
+  } else site.walls.forEach(([x1, z1, x2, z2], i) => {
     const len = Math.hypot(x2 - x1, z2 - z1);
     const ry = -Math.atan2(z2 - z1, x2 - x1);
     const wall = new THREE.Mesh(new THREE.PlaneGeometry(len, WALL_H), wallMat);
@@ -517,7 +555,7 @@ function buildSite(site, floorType) {
   // จุดวาร์ปในโหมด 360°: กลางแต่ละห้อง/อาคาร (+ ลานกลางวิทยาเขต)
   waypointGroup = new THREE.Group();
   const wpGeo = new THREE.RingGeometry(0.22, 0.34, 32);
-  const spots = site.zones.map(z => [z.x, z.z]);
+  const spots = site.zones.map(z => [z.lx !== undefined ? z.lx : z.x, z.lz !== undefined ? z.lz : z.z]);
   if (campus) spots.push([0, -2]);
   if (!campus && site.zones === FLOOR_ZONES) spots.push([-8, 0], [4, 0]);
   for (const [x, z] of spots) {
@@ -531,10 +569,424 @@ function buildSite(site, floorType) {
   return group;
 }
 
+// ผนังทึบตามความหนาจริงจากแผนผัง + หน้าต่างกระจก + เส้นบอกช่องประตูบนพื้น
+function buildSolidWalls(group, site) {
+  const wallMat = GLASS
+    ? new THREE.MeshStandardMaterial({ color: 0xc7d2fe, roughness: 0.35, metalness: 0.1, transparent: true, opacity: 0.3, depthWrite: false })
+    : new THREE.MeshStandardMaterial({ color: 0x2a3550, roughness: 0.85, transparent: true, opacity: 0.9 });
+  const capMat = new THREE.MeshBasicMaterial({ color: 0x22d3ee, transparent: true, opacity: 0.85 });
+  const glassMat = new THREE.MeshStandardMaterial({ color: 0x7dd3fc, roughness: 0.05, metalness: 0.3, transparent: true, opacity: 0.22, depthWrite: false });
+  const frameMat = new THREE.MeshBasicMaterial({ color: 0x93c5fd });
+  const SILL = Math.min(0.9, WALL_H * 0.28), HEAD = Math.min(2.2, WALL_H * 0.7);
+  const box = (x1, z1, x2, z2, t, y0, y1, mat) => {
+    const len = Math.hypot(x2 - x1, z2 - z1);
+    if (len < 0.02 || y1 <= y0) return null;
+    const m = new THREE.Mesh(new THREE.BoxGeometry(len + t * 0.9, y1 - y0, t), mat);
+    m.position.set((x1 + x2) / 2, (y0 + y1) / 2, (z1 + z2) / 2);
+    m.rotation.y = -Math.atan2(z2 - z1, x2 - x1);
+    m.castShadow = !GLASS; m.receiveShadow = true;
+    group.add(m);
+    return m;
+  };
+  for (const w of site.walls) {
+    const [x1, z1, x2, z2] = w, t = Math.max(0.05, w[5] || 0.12);
+    if (w[6] === 1) {                                     // หน้าต่าง: ผนังใต้ขอบ + กระจก + ผนังเหนือวงกบ
+      box(x1, z1, x2, z2, t, 0, SILL, wallMat);
+      box(x1, z1, x2, z2, t * 0.35, SILL, HEAD, glassMat);
+      box(x1, z1, x2, z2, t, HEAD, WALL_H, wallMat);
+      box(x1, z1, x2, z2, t * 1.15, SILL - 0.03, SILL, frameMat);
+      box(x1, z1, x2, z2, t * 1.15, HEAD, HEAD + 0.03, frameMat);
+    } else {
+      box(x1, z1, x2, z2, t, 0, WALL_H, wallMat);
+      box(x1, z1, x2, z2, t * 1.05, WALL_H - 0.02, WALL_H + 0.02, capMat);    // แถบไฟเรืองแสงขอบบน
+    }
+  }
+  const doorMat = new THREE.MeshBasicMaterial({ color: 0xfbbf24, transparent: true, opacity: 0.75, depthWrite: false });
+  for (const [x1, z1, x2, z2] of site.doors || []) {
+    const len = Math.hypot(x2 - x1, z2 - z1);
+    const m = new THREE.Mesh(new THREE.PlaneGeometry(len, 0.08), doorMat);
+    m.rotation.x = -Math.PI / 2;
+    m.rotation.z = -Math.atan2(z2 - z1, x2 - x1);
+    m.position.set((x1 + x2) / 2, 0.012, (z1 + z2) / 2);
+    group.add(m);
+  }
+}
+// พื้นจากภาพแผนผัง (สร้างครั้งเดียวต่อแผนผัง แล้วใช้ซ้ำ)
+function scanFloorTexture(site) {
+  if (!site.planObj || !window.PlanScanUI) return null;
+  const style = (site.plan && site.plan.style) || 'dark';
+  if (style !== 'rooms' && site.plan && site.plan.img && !site.imgEl) return null;          // รอโหลดภาพก่อน
+  if (!site.floorCanvas) site.floorCanvas = PlanScanUI.floorCanvas(site.planObj, style, site.imgEl || null);
+  const tex = new THREE.CanvasTexture(site.floorCanvas);
+  if (THREE.sRGBEncoding) tex.encoding = THREE.sRGBEncoding;
+  tex.anisotropy = 4;
+  return tex;
+}
+
+/* ---------------------- แผนผังที่สแกนจากรูป / ไฟล์ ---------------------- */
+function registerScanSite(json) {
+  if (!json || !window.PlanScan) return null;
+  let planObj;
+  try { planObj = PlanScan.restore(json); } catch (e) { console.error(e); return null; }
+  const site = PlanScan.toSite(planObj);
+  site.plan = json;
+  site.planObj = planObj;
+  site.label = `แผนผัง: ${json.name || 'สแกน'}`;
+  SITES.scan = site;
+  let grp = $('scanGroup');
+  if (!grp) { grp = h('optgroup', { id: 'scanGroup', label: 'แผนผังของฉัน (สแกน)' }); $('roomSizeSelect').append(grp); }
+  grp.innerHTML = '';
+  grp.append(h('option', { value: 'scan', text: `${json.name || 'แผนผังที่สแกน'} (${(site.floorW * site.scale).toFixed(1)}×${(site.floorL * site.scale).toFixed(1)} ม.)` }));
+  if (json.img && json.style !== 'rooms') {
+    const img = new Image();
+    img.onload = () => {
+      if (SITES.scan !== site) return;
+      site.imgEl = img;
+      site.floorCanvas = null;
+      if (roomSize() === site && scene) buildRoom();
+    };
+    img.src = json.img;
+  }
+  updateScanButton();
+  return site;
+}
+function updateScanButton() {
+  const b = $('btnScanPlan');
+  if (!b) return;
+  const span = b.querySelector('span');
+  if (span) span.textContent = roomSize().model ? 'แก้ไขผังบริเวณ (อาคาร ห้อง ต้นไม้ เสาไฟ)' : roomSize().scan ? 'แก้ไขแผนผังที่สแกน' : 'สแกนแผนผัง / ออกแบบผังบริเวณ';
+}
+function openPlanScanner() {
+  if (!window.PlanScanUI) return showToast('โหลดตัวสแกนแผนผังไม่สำเร็จ', true);
+  if (viewMode === '360') stopWalking();
+  const cur = SITES.scan ? SITES.scan.plan : null, curSite = SITES.site ? SITES.site.json : null, onSite = !!roomSize().model;
+  PlanScanUI.open({
+    plan: cur, site: curSite, mode: onSite ? 'site' : roomSize().scan ? 'plan' : null,
+    edit: onSite ? !!curSite : !!(cur && roomSize().scan), onApply: applyScanPlan, onApplySite: applyCampusPlan
+  });
+}
+function applyScanPlan(json) {
+  const prev = roomSize();
+  const site = registerScanSite(json);
+  if (!site) return showToast('สร้างห้องจากแผนผังไม่สำเร็จ', true);
+  $('roomSizeSelect').value = 'scan';
+  changeRoomConfig(prev);
+  // อุปกรณ์ที่ไปค้างนอกห้อง/ในผนัง → ย้ายเข้าห้องแรก
+  const z0 = site.zones.find(z => !z.corridor) || site.zones[0];
+  let moved = 0;
+  for (const [id, node] of nodes) {
+    const p = node.group.position;
+    if (z0 && !zoneAt(p.x, p.z)) {
+      currentZone = z0;
+      const spot = freeSpot();
+      p.x = spot.x; p.z = spot.z;
+      syncDevicePos(id);
+      moved++;
+    }
+  }
+  if (moved) { rebuildAllCables(); placeRings(); }
+  updateScanButton();
+  persist();
+  logConsole(`[SCAN] สร้างพื้นที่จากแผนผัง "${json.name}" แล้ว: ${site.zones.filter(z => !z.corridor).length} ห้อง · ผนัง ${site.walls.length} ส่วน · ขนาด ${(site.floorW * site.scale).toFixed(1)}×${(site.floorL * site.scale).toFixed(1)} ม.${moved ? ` · ย้ายอุปกรณ์ ${moved} ตัวเข้าห้อง` : ''}`, 'ok');
+  showToast(`สร้างห้อง 3D จากแผนผังแล้ว (${site.zones.filter(z => !z.corridor).length} ห้อง)`, 'ok');
+}
+
+/* ------------------- ผังบริเวณ: วิทยาลัย / วิทยาเขตจริง (site-model.js + site-3d.js) -------------------
+   อาคารหลายชั้นวางตามแผนที่ ห้องภายในแต่ละอาคาร ถนน ต้นไม้ เสาไฟฟ้า บ่อน้ำ — 1 หน่วย = 1 เมตรจริง */
+let navBuilding = -1;
+let campusCut = 'auto';             // auto = เปิดหลังคาอาคารที่ซูมเข้าไปดู, all = มองทะลุทุกอาคาร
+let skyTex = null;
+function skyTexture() {
+  if (skyTex) return skyTex;
+  const c = document.createElement('canvas');
+  c.width = 8; c.height = 256;
+  const g = c.getContext('2d'), gr = g.createLinearGradient(0, 0, 0, 256);
+  gr.addColorStop(0, '#3f7fcb'); gr.addColorStop(0.5, '#86b9e6'); gr.addColorStop(0.82, '#cfe4f5'); gr.addColorStop(1, '#e8f1f7');
+  g.fillStyle = gr; g.fillRect(0, 0, 8, 256);
+  skyTex = new THREE.CanvasTexture(c);
+  return skyTex;
+}
+// ท้องฟ้า หมอก และแสงแดดสำหรับฉากกลางแจ้ง (คืนค่าเดิมเมื่อกลับไปห้องในอาคาร)
+function applyEnvironment(site) {
+  if (!scene || !camera) return;
+  if (site.model) {
+    const span = Math.max(site.w, site.l);
+    scene.background = skyTexture();
+    scene.fog = new THREE.Fog(0xd3e5f3, span * 0.9, span * 3.4);
+    if (ambLight) ambLight.intensity = 0.3;
+    if (!hemiLight && THREE.HemisphereLight) { hemiLight = new THREE.HemisphereLight(0xdbeafe, 0x5a7340, 0.62); scene.add(hemiLight); }
+    if (hemiLight) hemiLight.visible = true;
+    if (glowLight) glowLight.intensity = 0;
+    if (sunLight) {
+      sunLight.intensity = 0.95;
+      if (sunLight.color) sunLight.color.setHex(0xfff2dc);
+      if (sunLight.shadow.mapSize.x !== 2048) { sunLight.shadow.mapSize.set(2048, 2048); if (sunLight.shadow.map) { sunLight.shadow.map.dispose(); sunLight.shadow.map = null; } }
+    }
+    camera.far = Math.max(500, span * 5);
+    camera.updateProjectionMatrix();
+  } else {
+    if (baseEnv) { scene.background = baseEnv.background; scene.fog = baseEnv.fog; }
+    if (ambLight) ambLight.intensity = 0.75;
+    if (hemiLight) hemiLight.visible = false;
+    if (glowLight) glowLight.intensity = GLASS ? 0.8 : 0.6;
+    if (sunLight) {
+      sunLight.intensity = 0.8;
+      if (sunLight.color) sunLight.color.setHex(0xffffff);
+      if (sunLight.target) { sunLight.target.position.set(0, 0, 0); if (sunLight.target.updateMatrixWorld) sunLight.target.updateMatrixWorld(); }
+    }
+    if (camera.far !== 500 || camera.near !== 0.05) { camera.near = 0.05; camera.far = 500; camera.updateProjectionMatrix(); }
+  }
+}
+function defaultZone(site) {
+  const zs = site.zones || [];
+  return zs.find(q => !q.corridor && /server/i.test(q.name)) || zs.find(q => !q.corridor && q.num) || zs.find(q => !q.corridor) || null;
+}
+function buildCampus(site) {
+  const view = SiteRender.build(site.desc, {
+    wallH: WALL_H, img: site.imgEl || null, underlay: (site.json && site.json.underlay) || 0,
+    groundRes: Math.min(2048, (renderer && renderer.capabilities && renderer.capabilities.maxTextureSize) || 2048),
+    roomLabel: (name, color) => zoneLabel(name, color, false)
+  });
+  campusView = view;
+  view.setCutaway(campusCut);
+  view.setHighlight(currentZone);
+  siteWalls = site.walls;
+  const group = view.group;
+  // จุดวาร์ปโหมด 360°: กลางทุกห้อง
+  waypointGroup = new THREE.Group();
+  const wpGeo = new THREE.RingGeometry(0.22, 0.34, 32), wpMat = new THREE.MeshBasicMaterial({ color: 0x00f0ff, transparent: true, opacity: 0.7, side: THREE.DoubleSide });
+  site.zones.forEach(z => {
+    if (z.corridor) return;
+    const wp = new THREE.Mesh(wpGeo, wpMat);
+    wp.rotation.x = -Math.PI / 2;
+    wp.position.set(z.lx, 0.04, z.lz);
+    waypointGroup.add(wp);
+  });
+  waypointGroup.visible = viewMode === '360';
+  group.add(waypointGroup);
+  return group;
+}
+function registerCampusSite(json) {
+  if (!json || !window.SiteModel || !window.SiteRender) return null;
+  let desc;
+  try { desc = SiteModel.toScene(json); } catch (e) { console.error(e); return null; }
+  const site = {
+    label: `ผังบริเวณ: ${json.name || 'วิทยาเขต'}`, kind: 'campus', model: true, scale: desc.scale,
+    w: desc.w, l: desc.l, floorW: desc.floorW, floorL: desc.floorL,
+    zones: desc.zones, walls: desc.walls, doors: desc.doors, wallLoss: 8, desc, json
+  };
+  SITES.site = site;
+  let grp = $('siteGroup');
+  if (!grp) { grp = h('optgroup', { id: 'siteGroup', label: 'ผังบริเวณของฉัน (หลายอาคาร)' }); $('roomSizeSelect').append(grp); }
+  grp.innerHTML = '';
+  grp.append(h('option', { value: 'site', text: `${json.name || 'ผังบริเวณ'} (${Math.round(desc.floorW * desc.scale)}×${Math.round(desc.floorL * desc.scale)} ม. · ${desc.buildings.length} อาคาร)` }));
+  if (json.img && json.underlay > 0) {
+    const img = new Image();
+    img.onload = () => { if (SITES.site !== site) return; site.imgEl = img; if (roomSize() === site && scene) buildRoom(); };
+    img.src = json.img;
+  }
+  updateScanButton();
+  return site;
+}
+function applyCampusPlan(json) {
+  const prev = roomSize();
+  const site = registerCampusSite(json);
+  if (!site) return showToast('สร้างผังบริเวณ 3D ไม่สำเร็จ', true);
+  $('roomSizeSelect').value = 'site';
+  if (!currentZone || !site.zones.includes(currentZone)) currentZone = defaultZone(site);
+  navBuilding = currentZone && currentZone.building !== undefined ? currentZone.building : -1;
+  changeRoomConfig(prev);
+  // อุปกรณ์ที่ไปค้างในผนัง/ในอาคารที่ไม่มีห้องแล้ว → ย้ายเข้าห้องที่เลือกอยู่
+  let moved = 0;
+  for (const [id, node] of nodes) {
+    const p = node.group.position;
+    if (currentZone && SiteModel.buildingAt(site.desc, p.x, p.z) && !zoneAt(p.x, p.z)) {
+      const spot = freeSpot();
+      p.x = spot.x; p.z = spot.z;
+      syncDevicePos(id);
+      moved++;
+    }
+  }
+  if (moved) { rebuildAllCables(); placeRings(); }
+  updateScanButton();
+  persist();
+  const nb = site.desc.buildings.length, nr = site.zones.filter(z => !z.corridor).length, np = site.desc.poles.reduce((a, l) => a + l.pts.length, 0);
+  logConsole(`[SITE] สร้างผังบริเวณ "${json.name}" แล้ว: ${nb} อาคาร · ${nr} ห้อง · ต้นไม้และวัตถุ ${site.desc.props.length} ชิ้น · เสาไฟฟ้า ${np} ต้น · ขนาด ${Math.round(site.floorW)}×${Math.round(site.floorL)} ม.${moved ? ` · ย้ายอุปกรณ์ ${moved} ตัวเข้าห้อง` : ''}`, 'ok');
+  showToast(`สร้างผังบริเวณ 3D แล้ว (${nb} อาคาร ${nr} ห้อง)`, 'ok');
+}
+// แถบซ้าย: เลือกอาคาร → เลือกห้อง
+function renderCampusNav(nav, site) {
+  nav.hidden = false;
+  nav.innerHTML = '';
+  const Bs = site.desc.buildings;
+  if (navBuilding < 0 && currentZone && currentZone.building !== undefined) navBuilding = currentZone.building;
+  const rooms = site.zones.filter(z => !z.corridor).length;
+  nav.append(h('small', { class: 'zone-nav__note', text: `${Bs.length} อาคาร · ${rooms} ห้อง · พื้นที่จริง ${Math.round(site.floorW)}×${Math.round(site.floorL)} ม. · สายทองแดงไม่เกิน 100 ม.` }));
+  nav.append(h('div', { class: 'zone-tools' },
+    h('button', { class: 'zone-tool', type: 'button', title: 'มองภาพรวมทั้งผัง', onclick: () => campusOverview() }, icon('fa-map-location-dot'), ' ภาพรวม'),
+    h('button', { class: 'zone-tool' + (campusCut === 'all' ? ' active' : ''), type: 'button', 'aria-pressed': String(campusCut === 'all'), title: 'ซ่อนหลังคาและชั้นบนทุกอาคาร เพื่อดูห้องและอุปกรณ์ข้างในพร้อมกัน', onclick: toggleXray }, icon('fa-layer-group'), campusCut === 'all' ? ' แสดงหลังคา' : ' มองทะลุหลังคา')));
+  const order = Bs.slice().sort((a, b) => (a.num ? 0 : 1) - (b.num ? 0 : 1) || (parseInt(a.num, 10) || 0) - (parseInt(b.num, 10) || 0));
+  nav.append(h('div', { class: 'zone-chips zone-chips--bldg' }, order.map(b => h('button', {
+    class: 'zone-chip zone-chip--bldg' + (b.index === navBuilding ? ' active' : ''), type: 'button', style: `--z:${b.color}`,
+    title: `${b.num ? 'อาคาร ' + b.num + ' · ' : ''}${b.name} (${b.floors} ชั้น · ${b.roomZone.filter(i => i >= 0).length} ห้อง)`, onclick: () => goBuilding(b.index)
+  }, b.num ? h('b', { class: 'zone-num', text: b.num }) : h('i', {}), h('span', { text: b.name.replace(/^อาคาร/, '') || b.name })))));
+  const B = Bs[navBuilding];
+  if (B) {
+    const list = B.roomZone.filter(i => i >= 0).map(i => site.zones[i]).filter(z => z && !z.corridor);
+    nav.append(h('div', { class: 'zone-rooms' },
+      h('small', { text: `ห้องใน${B.num ? 'อาคาร ' + B.num + ' ' : ''}${B.name} (อุปกรณ์ใหม่จะวางในห้องที่เลือก)` }),
+      h('div', { class: 'zone-chips' }, list.map(z => h('button', {
+        class: 'zone-chip' + (z === currentZone ? ' active' : ''), type: 'button', style: `--z:${z.color}`,
+        title: `ไปที่${z.name} (${z.areaM2} ตร.ม.)`, onclick: () => goZone(z)
+      }, h('i', {}), z.name)))));
+  }
+}
+function goBuilding(i) {
+  const site = roomSize(), b = site.desc && site.desc.buildings[i];
+  if (!b) return;
+  navBuilding = i;
+  const first = b.roomZone.map(k => site.zones[k]).find(z => z && !z.corridor);
+  if (first) currentZone = first;
+  if (campusView) campusView.setHighlight(currentZone);
+  renderZoneNav();
+  if (viewMode === '360') { if (first) walkTo(first.lx, first.lz); return; }
+  const d = Math.max(b.w, b.d), dist = d * 0.85 + 22;
+  const fx = -b.sin, fz = b.cos;                      // ด้านหน้าอาคาร (แกน +z ของอาคาร)
+  const to = V(b.x + fx * dist + b.cos * d * 0.25, dist * 0.62 + 8, b.z + fz * dist + b.sin * d * 0.25), toT = V(b.x, 2, b.z);
+  const from = camera.position.clone(), fromT = controls.target.clone();
+  tween(UI.reduced ? 1 : 900, k => { const t = ease(k); camera.position.lerpVectors(from, to, t); controls.target.lerpVectors(fromT, toT, t); });
+}
+function campusOverview(instant) {
+  const site = roomSize();
+  if (!site.model) return;
+  const span = Math.max(site.floorW, site.floorL);
+  const to = V(site.floorW * 0.08, span * 0.69, site.floorL * 0.83), toT = V(0, 0, site.floorL * 0.12);   // เห็นทั้งผังในจอแล็บ
+  if (instant || UI.reduced) { camera.position.copy(to); controls.target.copy(toT); return; }
+  const from = camera.position.clone(), fromT = controls.target.clone();
+  tween(1000, k => { const t = ease(k); camera.position.lerpVectors(from, to, t); controls.target.lerpVectors(fromT, toT, t); });
+}
+function toggleXray() {
+  campusCut = campusCut === 'all' ? 'auto' : 'all';
+  if (campusView) campusView.setCutaway(campusCut);
+  renderZoneNav();
+  logConsole(campusCut === 'all' ? '[VIEW] มองทะลุหลังคาทุกอาคาร — เห็นห้องและอุปกรณ์ทั้งวิทยาลัย' : '[VIEW] แสดงหลังคาและชั้นบน (ซูมเข้าใกล้อาคารเพื่อเปิดดูข้างใน)', 'info');
+}
+/* เส้นทางสายระหว่างอาคาร: จากอุปกรณ์ขึ้นรางใต้เพดาน → ทะลุผนังด้านนอก → ขึ้นเสาไฟฟ้า (สายสื่อสาร)
+   → พาดตามแนวเสา → ลงที่ผนังอาคารปลายทาง → รางใต้เพดาน → อุปกรณ์ */
+function campusRoute(A, B) {
+  const site = roomSize();
+  if (!site.model || !window.SiteModel || !A || !B) return null;
+  const desc = site.desc, POLE = window.SiteRender ? SiteRender.POLE_Y : 6.6, CEIL = WALL_H - 0.15, r3 = v => +(+v).toFixed(3);
+  const path = SiteModel.poleRoute(desc, { x: A.x || 0, z: A.z || 0 }, { x: B.x || 0, z: B.z || 0 }, 62);
+  if (!path.length) return null;
+  const leg = (dev, toward) => {
+    const pts = [], Bd = SiteModel.buildingAt(desc, dev.x || 0, dev.z || 0);
+    if (Bd) {
+      pts.push({ at: 'ceiling', dev: dev.id, dx: 0, dy: CEIL, dz: 0, keepDev: true, x: r3(dev.x), y: CEIL, z: r3(dev.z) });
+      const pin = SiteModel.exitPoint(Bd, toward.x, toward.z, -0.35), pout = SiteModel.exitPoint(Bd, toward.x, toward.z, 0.7);
+      pts.push({ at: 'wall', x: r3(pin.x), y: CEIL, z: r3(pin.z) }, { at: 'free', x: r3(pout.x), y: CEIL + 0.3, z: r3(pout.z) });
+    } else pts.push({ at: 'free', dev: dev.id, dx: 0, dy: 2.4, dz: 0, keepDev: true, x: r3(dev.x), y: 2.4, z: r3(dev.z) });
+    return pts;
+  };
+  return [...leg(A, path[0]), ...path.map(p => ({ at: 'pole', x: r3(p.x + 0.22), y: POLE, z: r3(p.z) })), ...leg(B, path[path.length - 1]).reverse()];
+}
+// สายใหม่ระหว่างอาคาร (หรือออกนอกอาคาร) ในผังบริเวณ → พาดตามเสาไฟให้อัตโนมัติ
+function autoCampusRoute(link) {
+  const site = roomSize();
+  if (!site.model || !link || link.cable === 'wireless' || !site.desc.poles.length) return false;
+  const A = devOf(link.a.dev), B = devOf(link.b.dev);
+  if (!A || !B || Math.hypot((A.x || 0) - (B.x || 0), (A.z || 0) - (B.z || 0)) < 25) return false;
+  const bA = SiteModel.buildingAt(site.desc, A.x || 0, A.z || 0), bB = SiteModel.buildingAt(site.desc, B.x || 0, B.z || 0);
+  if (bA && bA === bB) return false;
+  const r = campusRoute(A, B);
+  if (!r) return false;
+  link.route = r;
+  return true;
+}
+// ตำแหน่งว่างในห้อง (ห่างผนังและอุปกรณ์อื่น)
+function spotInZone(z, taken) {
+  const ok = (x, q) => zoneAt(x, q) === z && zoneAt(x + 0.6, q) === z && zoneAt(x - 0.6, q) === z && zoneAt(x, q + 0.6) === z && zoneAt(x, q - 0.6) === z;
+  const pts = [];
+  for (let dz = -z.l / 2 + 0.7; dz <= z.l / 2 - 0.7; dz += 1.3) for (let dx = -z.w / 2 + 0.7; dx <= z.w / 2 - 0.7; dx += 1.3) pts.push([z.x + dx, z.z + dz]);
+  pts.sort((a, b) => Math.hypot(a[0] - z.lx, a[1] - z.lz) - Math.hypot(b[0] - z.lx, b[1] - z.lz));
+  for (const [x, q] of pts) if (ok(x, q) && !taken.some(t => Math.hypot(t.x - x, t.z - q) < 1.25)) return { x: +x.toFixed(2), z: +q.toFixed(2) };
+  return { x: +(z.lx + (taken.length % 3 - 1) * 0.9).toFixed(2), z: +(z.lz + (Math.floor(taken.length / 3) % 3 - 1) * 0.9).toFixed(2) };
+}
+function placeTemplateDevices(list, site) {
+  const desc = site.desc, taken = [], P = window.SiteTemplates ? SiteTemplates.P : (x, y) => [x, y];
+  return list.map(d0 => {
+    const d = JSON.parse(JSON.stringify(d0)), at = d.at;
+    delete d.at;
+    if (!at) return d;
+    if (at[0] === 'xy') {
+      const [px, py] = P(at[1], at[2]);
+      d.x = +((px - desc.W / 2) * desc.k).toFixed(2); d.z = +((py - desc.H / 2) * desc.k).toFixed(2);
+    } else {
+      const z = desc.zones.find(q => q.num === at[0] && q.name === at[1]) || desc.zones.find(q => q.name === at[1]);
+      Object.assign(d, z ? spotInZone(z, taken) : { x: 0, z: 0 });
+    }
+    taken.push(d);
+    return d;
+  });
+}
+async function loadCampusTemplate() {
+  if (!window.SiteTemplates || !window.SiteRender || pumping) return;
+  const t = SiteTemplates.COLLEGE_NET;
+  const ok = await UI.confirm({ title: `โหลดตัวอย่าง "${t.title}"?`, message: 'ผังวิทยาลัยจริง (21 อาคาร ถนน บ่อน้ำ สนาม ต้นไม้ เสาไฟฟ้า) พร้อมเครือข่าย Fiber ระหว่างอาคาร จะแทนที่อุปกรณ์และสายในห้องตอนนี้ (ถ้าต้องการเก็บงานเดิม ให้กด "ส่งออกไฟล์" ก่อน)', confirmText: 'โหลดตัวอย่าง' });
+  if (!ok) return;
+  if (activity) stopActivity();
+  if (viewMode === '360') switchViewMode('3d');
+  const site = registerCampusSite(SiteTemplates.college());
+  if (!site) return showToast('สร้างผังวิทยาลัยไม่สำเร็จ', true);
+  $('roomSizeSelect').value = 'site';
+  currentZone = defaultZone(site);
+  navBuilding = currentZone ? currentZone.building : -1;
+  campusCut = 'auto';
+  const devices = placeTemplateDevices(t.devices, site);
+  loadTemplateData({ room: 'site', devices, links: t.links.map(([a, b, cable]) => [a, b, cable]) });
+  lastSiteKey = 'site';
+  let routed = 0;
+  t.links.forEach(([a, b, , how]) => {
+    if (how !== 'pole') return;
+    const link = [...net.links.values()].find(l => (l.a.dev === a && l.b.dev === b) || (l.a.dev === b && l.b.dev === a));
+    const r = link && campusRoute(devOf(link.a.dev), devOf(link.b.dev));
+    if (r) { link.route = r; routed++; }
+  });
+  net.syncWireless();
+  rebuildAllCables();
+  clearEventList();
+  selectDevice3D(null);
+  refreshAll();
+  reset3DCamera();
+  persist();
+  const fiber = [...net.links.values()].filter(l => l.cable === 'fiber');
+  logConsole(`[TEMPLATE] โหลด "${t.title}" แล้ว (${net.devices.size} อุปกรณ์ · ${net.links.size} สาย · Fiber ${fiber.length} เส้น พาดตามเสาไฟ ${routed} เส้น รวม ${fiber.reduce((a, l) => a + net.cableLength(l), 0).toLocaleString('th-TH')} ม.)`, 'info');
+  $('infoModalTitle').textContent = t.title;
+  // เนื้อหาเป็นข้อความคงที่ในไฟล์ site-templates.js (ไม่ได้มาจากผู้ใช้) จึงใส่เป็น HTML ได้
+  $('infoModalBody').innerHTML = `<ol>${t.steps.map(x => `<li>${x}</li>`).join('')}</ol>`;
+  $('infoModal').classList.add('active');
+}
+// ทุกเฟรม: อัปเดตฉากวิทยาลัย (เปิดหลังคา น้ำ ธง) ระยะกล้อง และเงาตามจุดที่มอง
+frameHooks.add(now => {
+  if (!campusView) return;
+  campusView.setWalking(viewMode === '360');
+  campusView.update(now, camera, controls.target);
+  const dist = camera.position.distanceTo(controls.target);
+  const near = viewMode === '360' ? 0.05 : Math.min(2, Math.max(0.05, dist * 0.004));
+  if (Math.abs(near - camera.near) > camera.near * 0.2) { camera.near = near; camera.updateProjectionMatrix(); }
+  if (sunLight && sunLight.shadow) {
+    const r = Math.max(30, Math.min(330, (viewMode === '360' ? 40 : dist) * 0.85)), t = controls.target, sc = sunLight.shadow.camera, D = r * 2 + 80;
+    sunLight.position.set(t.x + D * 0.42, D * 0.82, t.z + D * 0.38);
+    if (sunLight.target) { sunLight.target.position.set(t.x, 0, t.z); if (sunLight.target.updateMatrixWorld) sunLight.target.updateMatrixWorld(); }
+    if (Math.abs((sc.right || 0) - r) > r * 0.1) { Object.assign(sc, { left: -r, right: r, top: r, bottom: -r, near: 1, far: D + r * 2 + 60 }); sc.updateProjectionMatrix(); }
+  }
+});
+
 // ปุ่มลัดไปยังแต่ละห้อง/อาคาร (แถบซ้าย)
 function renderZoneNav() {
   const nav = $('zoneNav');
   if (!nav) return;
+  if (roomSize().model) return renderCampusNav(nav, roomSize());
   const zones = siteZones().filter(z => !z.corridor);
   nav.hidden = !zones.length;
   nav.innerHTML = '';
@@ -548,24 +1000,28 @@ function renderZoneNav() {
 }
 function goZone(z) {
   currentZone = z;
+  if (z.building !== undefined) navBuilding = z.building;
+  if (campusView) campusView.setHighlight(z);
   renderZoneNav();
-  if (viewMode === '360') { walkTo(z.x, z.z + Math.min(1.5, z.l * 0.2)); return; }
+  const zx = z.lx !== undefined ? z.lx : z.x, zz = z.lz !== undefined ? z.lz : z.z;
+  if (viewMode === '360') { walkTo(zx, z.lz !== undefined ? zz : zz + Math.min(1.5, z.l * 0.2)); return; }
   const from = camera.position.clone(), fromT = controls.target.clone();
   const d = Math.max(z.w, z.l);
-  const to = new THREE.Vector3(z.x + d * 0.55, d * 0.75 + 3, z.z + d * 0.85), toT = new THREE.Vector3(z.x, 0.5, z.z);
+  const to = new THREE.Vector3(zx + d * 0.55, d * 0.75 + 3, zz + d * 0.85), toT = new THREE.Vector3(zx, 0.5, zz);
   tween(UI.reduced ? 1 : 800, k => { const t = ease(k); camera.position.lerpVectors(from, to, t); controls.target.lerpVectors(fromT, toT, t); });
 }
 
 const clamp = (v, lim) => Math.max(-lim, Math.min(lim, v));
 
 let lastSiteKey = null;
-function changeRoomConfig() {
-  const prev = SITES[lastSiteKey] || null;
+function changeRoomConfig(prevSite) {
+  const prev = (prevSite && prevSite.w ? prevSite : null) || SITES[lastSiteKey] || null;
   lastSiteKey = $('roomSizeSelect').value;
+  updateScanButton();
   buildRoom();
   const { w, l } = roomSize();
   // จากห้องเดียว → หลายห้อง/อาคาร: ยกอุปกรณ์ทั้งหมดไปไว้ในห้อง/อาคารแรก (ไม่ให้ไปค้างกลางทางเดินหรือคร่อมผนัง)
-  const z0 = siteZones().find(z => !z.corridor);
+  const z0 = (currentZone && siteZones().includes(currentZone) && !currentZone.corridor) ? currentZone : siteZones().find(z => !z.corridor);
   if (z0 && (!prev || !prev.zones)) {
     const fit = Math.min(1, (z0.w - 1.6) / (prev ? prev.w : 8), (z0.l - 1.6) / (prev ? prev.l : 8));
     for (const [id, node] of nodes) {
@@ -586,7 +1042,7 @@ function changeRoomConfig() {
   placeRings();
   if (viewMode === '3d') reset3DCamera(); else enterTour();
   const site = roomSize();
-  logConsole(site.zones ? `[ROOM] เปลี่ยนพื้นที่เป็น ${site.label} (${site.zones.filter(z => !z.corridor).length} ${site.kind === 'campus' ? 'อาคาร' : 'ห้อง'})` : `[ROOM] ปรับห้องเป็น ${w}x${l} เมตร`, 'info');
+  logConsole(site.zones ? `[ROOM] เปลี่ยนพื้นที่เป็น ${site.label} (${site.zones.filter(z => !z.corridor).length} ${site.kind === 'campus' && !site.model ? 'อาคาร' : 'ห้อง'})` : `[ROOM] ปรับห้องเป็น ${w}x${l} เมตร`, 'info');
 }
 
 /* ==========================================================================
@@ -1074,12 +1530,16 @@ function freeSpot() {
   const taken = [...nodes.values()].map(n => n.group.position);
   if (currentZone) {
     const z = currentZone;
-    for (let dz = -z.l / 2 + 1; dz <= z.l / 2 - 0.8; dz += 1.5) {
-      for (let dx = -z.w / 2 + 1; dx <= z.w / 2 - 0.8; dx += 1.6) {
+    const exact = !!(roomSize().zoneGrid || roomSize().model);   // แผนผังที่สแกน/ผังบริเวณ: ห้องอาจไม่ใช่สี่เหลี่ยมหรือหมุนเอียง ต้องอยู่ในห้องจริงและห่างผนัง
+    const inside = (x, q) => !exact || (zoneAt(x, q) === z && zoneAt(x + 0.5, q) === z && zoneAt(x - 0.5, q) === z && zoneAt(x, q + 0.5) === z && zoneAt(x, q - 0.5) === z);
+    const step = exact ? Math.max(0.6, Math.min(1.5, Math.min(z.w, z.l) / 4)) : 1.5;
+    for (let dz = -z.l / 2 + (exact ? 0.6 : 1); dz <= z.l / 2 - (exact ? 0.6 : 0.8); dz += step) {
+      for (let dx = -z.w / 2 + (exact ? 0.6 : 1); dx <= z.w / 2 - (exact ? 0.6 : 0.8); dx += exact ? step : 1.6) {
         const x = z.x + dx, q = z.z + dz;
-        if (!taken.some(p => Math.hypot(p.x - x, p.z - q) < 1.3)) return { x, z: q };
+        if (inside(x, q) && !taken.some(p => Math.hypot(p.x - x, p.z - q) < 1.3)) return { x, z: q };
       }
     }
+    if (exact && z.lx !== undefined) return { x: z.lx + (Math.random() - 0.5) * 0.6, z: z.lz + (Math.random() - 0.5) * 0.6 };
     return { x: z.x + (Math.random() - 0.5) * (z.w - 2), z: z.z + (Math.random() - 0.5) * (z.l - 2) };
   }
   const { w, l } = roomSize();
@@ -1389,10 +1849,17 @@ function buildCable(link) {
   const color = st.up ? NetSim.CABLES[link.cable].color : 0xb4233f;
   const mat = new THREE.MeshBasicMaterial({ color });
   if (wifi) { mat.transparent = true; mat.opacity = 0.35; }
-  const mesh = new THREE.Mesh(new THREE.TubeGeometry(curve, route ? Math.max(28, (route.length + 1) * 16) : 28, CABLE_RADIUS[link.cable] || 0.025, 6, false), mat);
+  const big = !!roomSize().model;
+  const mesh = new THREE.Mesh(new THREE.TubeGeometry(curve, route ? Math.max(28, (route.length + 1) * 16) : 28, (CABLE_RADIUS[link.cable] || 0.025) * (big ? 1.6 : 1), 6, false), mat);
   mesh.userData.linkId = link.id;
   scene.add(mesh);
   const extras = [];
+  if (big && !wifi && curve.getPoints) {
+    // ผังบริเวณกว้างหลายร้อยเมตร: เส้นบาง 1 พิกเซลซ้อนสาย ให้มองเห็นสายระหว่างอาคารแม้ซูมออกไกล
+    const line = new THREE.Line(new THREE.BufferGeometry().setFromPoints(curve.getPoints(route ? Math.min(400, route.length * 12 + 20) : 40)), new THREE.LineBasicMaterial({ color }));
+    scene.add(line);
+    extras.push(line);
+  }
   if (!wifi) {
     const ledColor = !link.data ? 0x67e8f9 : (st.up ? 0x00e676 : 0xff3d71);
     for (const p of [a, b]) {
@@ -1432,7 +1899,7 @@ function removeCable(linkId) {
   if (!c) return;
   scene.remove(c.mesh);
   c.mesh.geometry.dispose(); c.mesh.material.dispose();
-  c.extras.forEach(e => { scene.remove(e); if (e.geometry) e.geometry.dispose(); if (e.isMesh) e.material.dispose(); });
+  c.extras.forEach(e => { scene.remove(e); if (e.geometry) e.geometry.dispose(); if (e.isMesh || e.isLine) e.material.dispose(); });
   cables.delete(linkId);
 }
 
@@ -1523,6 +1990,7 @@ function reportLink(res) {
 
 function addLink(aId, aPort, bId, bPort, cable) {
   const res = net.connect(aId, aPort, bId, bPort, cable);
+  if (res.ok && autoCampusRoute(res.link)) logConsole(`[CABLE] สายระหว่างอาคารพาดตามเสาไฟฟ้าให้อัตโนมัติ (ยาวจริง ${net.cableLength(res.link)} ม.) — แก้เส้นทางได้ในโหมดแก้ไข (E)`, 'info');
   if (res.ok) { buildCable(res.link); drawCableIn(cables.get(res.link.id), 0); refreshAll(); if (res.link.up) award({ xp: 10, reason: 'ต่อสายเส้นแรก', once: 'first-link', badges: ['first_link'] }); }
   return reportLink(res);
 }
@@ -1936,7 +2404,8 @@ function flyPacket(ev, dur) {
     const t = ease(k);
     pkt.position.copy(cable.curve.getPoint(forward ? t : 1 - t));
     pkt.userData.body.rotation.y += 0.09;
-    pkt.scale.setScalar(1 + 0.18 * Math.sin(k * Math.PI));
+    const far = campusView ? Math.max(1, Math.min(40, camera.position.distanceTo(pkt.position) / 22)) : 1;   // ผังกว้าง: แพ็กเก็ตใหญ่ขึ้นตามระยะกล้อง
+    pkt.scale.setScalar((1 + 0.18 * Math.sin(k * Math.PI)) * far);
   }).then(() => scene.remove(pkt));
 }
 
@@ -2479,7 +2948,7 @@ const segDist = (px, pz, [x1, z1, x2, z2]) => {
   return Math.hypot(px - (x1 + t * dx), pz - (z1 + t * dz));
 };
 function walkBlocked(x, z) {
-  if (siteWalls.some(sg => segDist(x, z, sg) < BODY_R)) return true;     // ผนังห้อง/อาคาร (เดินผ่านช่องประตูได้)
+  if (siteWalls.some(sg => segDist(x, z, sg) < BODY_R + (sg[5] || 0) / 2)) return true;     // ผนังห้อง/อาคาร (เดินผ่านช่องประตูได้)
   for (const [id, n] of nodes) {
     const d = devOf(id);
     if (!d || n.height < 0.25) continue;                    // ของเตี้ย (ปลั๊ก เซนเซอร์) เดินข้ามได้
@@ -2563,6 +3032,7 @@ function buildWasdPad() {
 
 function reset3DCamera() {
   if (viewMode !== '3d') return enterTour();
+  if (roomSize().model) return campusOverview(true);
   const { w, l } = roomSize();
   camera.position.set(w * 1.05, Math.max(w, l) * 1.05, l * 1.35);
   controls.target.set(0, 0.6, 0);
@@ -3021,7 +3491,7 @@ function projectPayload() {
   nodes.forEach((_, id) => syncDevicePos(id));
   return {
     app: 'SimuCore 3D', version: 4, lab: MODEL, projectName: projectName(),
-    room: { size: $('roomSizeSelect').value, floor: $('floorTextureSelect').value },
+    room: { size: $('roomSizeSelect').value, floor: $('floorTextureSelect').value, plan: SITES.scan ? SITES.scan.plan : undefined, site: SITES.site ? SITES.site.json : undefined },
     net: net.serialize(), activity,
     exportedAt: new Date().toLocaleString('th-TH')
   };
@@ -3063,6 +3533,8 @@ function importProject(input) {
 
 function loadProjectData(data) {
   if (data.room) {
+    if (data.room.plan) registerScanSite(data.room.plan);
+    if (data.room.site) registerCampusSite(data.room.site);
     if (ROOMS[data.room.size]) $('roomSizeSelect').value = data.room.size;
     if (data.room.floor) $('floorTextureSelect').value = data.room.floor;
   }
@@ -3118,7 +3590,7 @@ function persist() {
     nodes.forEach((_, id) => syncDevicePos(id));
     return Store.workspaces.save(WORKSPACE_KEY, {
       version: 5,
-      room: { size: $('roomSizeSelect').value, floor: $('floorTextureSelect').value },
+      room: { size: $('roomSizeSelect').value, floor: $('floorTextureSelect').value, plan: SITES.scan ? SITES.scan.plan : undefined, site: SITES.site ? SITES.site.json : undefined },
       net: net.serialize(),
       activity,
       updatedAt: new Date().toLocaleString('th-TH')
@@ -3137,6 +3609,8 @@ function applySaved(data) {
     if (!data || !data.net || !Array.isArray(data.net.devices)) return false;
     if (!PROJECT_ID && data.net.devices.length === 0) return false;
     if (data.room) {
+      if (data.room.plan) registerScanSite(data.room.plan);
+      if (data.room.site) registerCampusSite(data.room.site);
       if (ROOMS[data.room.size]) $('roomSizeSelect').value = data.room.size;
       if (data.room.floor) $('floorTextureSelect').value = data.room.floor;
     }

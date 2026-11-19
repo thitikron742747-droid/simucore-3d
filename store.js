@@ -365,11 +365,6 @@
     // เรียกที่ต้นหน้า: ถ้ายังไม่ได้เข้าสู่ระบบ ให้ไปหน้า auth.html แล้วกลับมาหน้าเดิม
     requireLogin() {
       if (readSession()) return true;
-      // ลิงก์แชร์ (?guest=1) เข้าหน้าได้ทันทีแบบผู้เยี่ยมชม ไม่ต้องผ่านหน้าเข้าสู่ระบบ
-      if (CFG.allowGuest && new URLSearchParams(location.search).has('guest')) {
-        LocalAdapter.guest();
-        return true;
-      }
       const here = location.pathname.split('/').pop() + location.search;
       location.replace('auth.html?next=' + encodeURIComponent(here || 'index.html'));
       return false;

@@ -16,8 +16,13 @@
     floor: { th: 'พื้น', color: 0x34d399, icon: 'fa-border-none' },
     wall: { th: 'ผนัง', color: 0x22d3ee, icon: 'fa-border-all' },
     ceiling: { th: 'เพดาน / ราง', color: 0xa855f7, icon: 'fa-grip-lines' },
-    device: { th: 'อุปกรณ์', color: 0xfbbf24, icon: 'fa-link' }
+    device: { th: 'อุปกรณ์', color: 0xfbbf24, icon: 'fa-link' },
+    pole: { th: 'เสาไฟฟ้า', color: 0xf97316, icon: 'fa-bolt' }
   };
+  const campus = () => !!(roomSize().model && roomSize().desc);
+  const poles = () => (campus() && window.SiteRender ? roomSize().desc.poles.flatMap(l => l.pts) : []);
+  const POLE_Y = () => (window.SiteRender ? SiteRender.POLE_Y : 6.6);
+  const MAX_Y = () => (campus() ? 14 : WALL_H + 2);
   const FLOOR_Y = 0.03, WALL_Y = 0.35, OFF = 0.07;
   const CEIL_Y = () => WALL_H - 0.12;
   const clone = o => (o === undefined ? undefined : JSON.parse(JSON.stringify(o)));
@@ -37,7 +42,8 @@
   // จุดบนผนังที่ใกล้ที่สุด ขยับออกมาจากผนังเล็กน้อยฝั่งเดียวกับจุดเดิม
   function onWall(x, z) {
     let best = null;
-    for (const [x1, z1, x2, z2] of allWalls()) {
+    for (const wl of allWalls()) {
+      const [x1, z1, x2, z2] = wl, off = OFF + (wl[5] || 0) / 2;      // ผนังหนา (แผนผังที่สแกน): เดินสายบนผิวผนัง
       const dx = x2 - x1, dz = z2 - z1, L = dx * dx + dz * dz || 1;
       const t = Math.max(0, Math.min(1, ((x - x1) * dx + (z - z1) * dz) / L));
       const px = x1 + t * dx, pz = z1 + t * dz, d = Math.hypot(x - px, z - pz);
@@ -46,7 +52,7 @@
         const nl = Math.hypot(nx, nz) || 1;
         nx /= nl; nz /= nl;
         if ((x - px) * nx + (z - pz) * nz < 0) { nx = -nx; nz = -nz; }
-        best = { d, x: px + nx * OFF, z: pz + nz * OFF };
+        best = { d, x: px + nx * off, z: pz + nz * off };
       }
     }
     return best || { x, z };
@@ -64,6 +70,12 @@
     if (at === 'floor') y = FLOOR_Y;
     if (at === 'ceiling') y = CEIL_Y();
     if (at === 'wall') { const w = onWall(x, z); x = w.x; z = w.z; y = Math.max(0.1, Math.min(WALL_H - 0.1, y)); }
+    if (at === 'pole') {
+      // ยึดกับเสาไฟฟ้าต้นที่ใกล้ที่สุด ที่ระดับสายสื่อสาร
+      let best = null;
+      poles().forEach(p => { const d = Math.hypot(p.x - x, p.z - z); if (!best || d < best.d) best = { d, p }; });
+      if (best) { x = best.p.x + 0.22; z = best.p.z; y = POLE_Y(); }
+    }
     if (at === 'device') {
       const nd = (p.dev !== undefined && net.devices.get(p.dev)) ? { d: net.devices.get(p.dev), dd: 0 } : nearestDevice(x, z);
       if (nd) {
@@ -80,7 +92,7 @@
     }
     const { w, l } = roomSize();
     n.x = +Math.max(-w / 2, Math.min(w / 2, x)).toFixed(3);
-    n.y = +Math.max(0, Math.min(WALL_H + 2, y)).toFixed(3);
+    n.y = +Math.max(0, Math.min(MAX_Y(), y)).toFixed(3);
     n.z = +Math.max(-l / 2, Math.min(l / 2, z)).toFixed(3);
     if (n.dev !== undefined && !n.keepDev && at !== 'device') delete n.dev;
     return n;
@@ -143,6 +155,15 @@
     const l = link();
     if (!l) return;
     const A = net.devices.get(l.a.dev), B = net.devices.get(l.b.dev);
+    if (kind === 'pole') {
+      const pr = typeof campusRoute === 'function' ? campusRoute(A, B) : null;
+      if (!pr) { showToast('ผังนี้ยังไม่มีแนวเสาไฟฟ้า — เพิ่มได้ที่ "แก้ไขผังบริเวณ"', true); return; }
+      commit(r => { r.length = 0; r.push(...pr); });
+      sel = -1;
+      drawHandles();
+      logConsole(`[CABLE] ${net.linkLabel(l)}: พาดสายตามเสาไฟฟ้า ${pr.filter(p => p.at === 'pole').length} ต้น · ยาว ${net.cableLength(l)} ม.`, 'info');
+      return;
+    }
     commit(r => {
       r.length = 0;
       if (kind === 'auto') return;
@@ -193,7 +214,7 @@
         // เพิ่มจุดหักกลางเส้น (ยึดแบบเดียวกับจุดข้างเคียง)
         const i = o.userData.insert, r = route();
         const near = r[Math.min(i, r.length - 1)];
-        const at = near && near.at !== 'device' ? near.at : 'free';
+        const at = near && near.at !== 'device' && near.at !== 'pole' ? near.at : 'free';
         r.splice(i, 0, constrain({}, at, { x: o.position.x, y: o.position.y, z: o.position.z }));
         sel = i;
         rebuild();
@@ -222,7 +243,7 @@
     if (!p) return true;
     if (event.shiftKey && p.at !== 'floor' && p.at !== 'ceiling') {
       // Shift + ลากขึ้นลง = ปรับความสูง
-      const y = Math.max(0.03, Math.min(WALL_H + 1.5, drag.y0 + (drag.startY - event.clientY) * 0.012));
+      const y = Math.max(0.03, Math.min(MAX_Y() - 0.5, drag.y0 + (drag.startY - event.clientY) * (campus() ? 0.04 : 0.012)));
       if (p.dev !== undefined) p.dy = +y.toFixed(3); else p.y = +y.toFixed(3);
     } else {
       setMouse(event);
@@ -312,7 +333,8 @@
           h('button', { class: 'btn', onclick: () => preset('floor') }, icon('fa-border-none'), ' เลียบพื้น'),
           h('button', { class: 'btn', onclick: () => preset('ceiling') }, icon('fa-grip-lines'), ' รางเพดาน'),
           h('button', { class: 'btn', onclick: () => preset('wall') }, icon('fa-border-all'), ' รางผนัง'),
-          h('button', { class: 'btn', onclick: () => preset('auto') }, icon('fa-wave-square'), ' โค้งอัตโนมัติ'))),
+          h('button', { class: 'btn', onclick: () => preset('auto') }, icon('fa-wave-square'), ' โค้งอัตโนมัติ'),
+          poles().length ? h('button', { class: 'btn route-pole', onclick: () => preset('pole') }, icon('fa-bolt'), ' พาดตามเสาไฟฟ้า') : null)),
       h('div', { class: 'prop-section' },
         h('div', { class: 'sec-title', text: `จุดหักบนสาย (${r.length})` }),
         r.length ? h('div', { class: 'route-points' }, r.map((q, i) => h('button', {
@@ -325,8 +347,8 @@
           class: 'route-anc' + ((p.at || 'free') === k ? ' active' : ''), style: `--c:${hex(a.color)}`, onclick: () => setAnchor(k)
         }, icon(a.icon), a.th))),
         p.at === 'device' && devOf(p.dev) ? h('p', { class: 'hint', text: `ยึดกับ ${devOf(p.dev).name} — ย้ายอุปกรณ์แล้วจุดนี้ตามไปด้วย` }) : null,
-        (p.at === 'floor' || p.at === 'ceiling') ? null : h('div', { class: 'form-group' }, h('label', { text: 'ความสูงจากพื้น (เมตร)' }),
-          h('input', { type: 'range', min: 0.03, max: WALL_H, step: 0.01, value: absOf(p).y,
+        (p.at === 'floor' || p.at === 'ceiling' || p.at === 'pole') ? null : h('div', { class: 'form-group' }, h('label', { text: 'ความสูงจากพื้น (เมตร)' }),
+          h('input', { type: 'range', min: 0.03, max: p.at === 'pole' ? MAX_Y() : campus() && p.at !== 'wall' ? 10 : WALL_H, step: 0.01, value: absOf(p).y,
             oninput: e => setHeight(Number(e.target.value)),
             onchange: () => { refreshAll(); persist(); CE.renderPanel(); } })),
         h('button', { class: 'btn btn-danger', onclick: CE.removePoint }, icon('fa-trash'), ' ลบจุดนี้')) : null,

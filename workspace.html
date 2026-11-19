@@ -14,6 +14,7 @@
   <link rel="stylesheet" href="workspace-glass.css">
   <link rel="stylesheet" href="lab-plus.css">
   <link rel="stylesheet" href="life-plus.css">
+  <link rel="stylesheet" href="plan-scan.css">
   <script src="config.js"></script>
   <script src="store.js"></script>
   <script>Store.requireLogin();</script>
@@ -77,12 +78,14 @@
               </optgroup>
             </select>
           </div>
+          <button class="btn scan-btn" id="btnScanPlan" type="button" onclick="openPlanScanner()" title="แนบรูปถ่าย/ภาพแผนผัง SVG PDF หรือไฟล์ DXF แล้วระบบสร้างห้องและผนัง 3D ให้ตรงกับแผนผัง — หรือแนบแผนที่โรงเรียน/วิทยาลัย แล้ววางอาคาร ถนน ต้นไม้ เสาไฟ บ่อน้ำ เป็นผังบริเวณ 3D"><i class="fa-solid fa-object-group"></i> <span>สแกนแผนผัง / ออกแบบผังบริเวณ</span></button>
           <div class="zone-nav" id="zoneNav" hidden></div>
           <div class="big-templates">
             <span>ตัวอย่างเครือข่ายใหญ่</span>
             <button class="btn" onclick="loadBigTemplate('home')" title="บ้านจริง: เราเตอร์ Wi-Fi, ทีวี, เครื่องเล่นเกม, กล้องวงจรปิด, มือถือ — ใช้กับโจทย์เน็ตบ้านมีปัญหา"><i class="fa-solid fa-house-signal"></i> บ้านของฉัน</button>
             <button class="btn" onclick="loadBigTemplate('floor')" title="อาคารเรียน 4 ห้อง: ห้องเซิร์ฟเวอร์ ห้องคอม 2 ห้อง ห้องพักครู (Wi-Fi)"><i class="fa-solid fa-building"></i> อาคารเรียน 4 ห้อง</button>
             <button class="btn" onclick="loadBigTemplate('campus')" title="3 อาคาร เชื่อมกันด้วย Fiber Backbone ผ่าน Core Switch"><i class="fa-solid fa-city"></i> วิทยาเขต 3 อาคาร</button>
+            <button class="btn" onclick="loadCampusTemplate()" title="ผังวิทยาลัยการอาชีพชนแดนตามแผนที่จริง: 21 อาคาร ถนน บ่อน้ำ สนาม ต้นไม้ เสาไฟฟ้า พร้อมเครือข่าย Fiber พาดตามเสาไฟ"><i class="fa-solid fa-school"></i> วิทยาลัย (ผังจริง)</button>
           </div>
           <div class="file-actions">
             <button class="btn" onclick="exportProject()" title="ดาวน์โหลดงานเป็นไฟล์ .json เพื่อส่งครูหรือเปิดที่เครื่องอื่น"><i class="fa-solid fa-file-arrow-down"></i> ส่งออกไฟล์</button>
@@ -293,6 +296,12 @@
 <script src="network-engine.js"></script>
 <script src="activities.js"></script>
 <script src="ui.js"></script>
+<script src="plan-scan.js"></script>
+<script src="site-model.js"></script>
+<script src="site-templates.js"></script>
+<script src="site-3d.js"></script>
+<script src="plan-scan-ui.js"></script>
+<script src="site-designer.js"></script>
 <script src="workspace.js"></script>
 <script src="cable-route.js"></script>
 <script src="lab-plus.js"></script>

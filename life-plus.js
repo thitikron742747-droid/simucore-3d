@@ -37,14 +37,37 @@
 
   /* ------------------------- 1. แผนที่สัญญาณ Wi-Fi ------------------------- */
   const heat = { on: false, mesh: null, sig: '', last: 0 };
-  const heatSig = () => [lastSiteKey, ...[...net.devices.values()].filter(isAp).map(a => `${a.id}:${(a.x || 0).toFixed(2)},${(a.z || 0).toFixed(2)}:${a.wifi.ssid}`)].join('|');
+  const heatSig = () => [lastSiteKey, roomSize().w, roomSize().l, net.walls.length, ...[...net.devices.values()].filter(isAp).map(a => `${a.id}:${(a.x || 0).toFixed(2)},${(a.z || 0).toFixed(2)}:${a.wifi.ssid}`)].join('|');
   function clearHeat() {
     if (!heat.mesh) return;
     scene.remove(heat.mesh);
-    heat.mesh.geometry.dispose();
-    if (heat.mesh.material.map) heat.mesh.material.map.dispose();
-    heat.mesh.material.dispose();
+    heat.mesh.traverse(m => { if (!m.isMesh) return; m.geometry.dispose(); if (m.material.map) m.material.map.dispose(); m.material.dispose(); });
     heat.mesh = null;
+  }
+  const heatCol = r => r >= -55 ? [34, 197, 94] : r >= -67 ? [132, 204, 22] : r >= -75 ? [250, 204, 21] : r >= -80 ? [249, 115, 22] : [239, 68, 68];
+  // แผ่นสีสัญญาณในกรอบ (x0,z0)-(x0+w,z0+l)
+  function heatTile(aps, x0, z0, w, l, cell, faint) {
+    const cols = Math.max(1, Math.ceil(w / cell)), rows = Math.max(1, Math.ceil(l / cell));
+    const c = document.createElement('canvas');
+    c.width = cols; c.height = rows;
+    const ctx = c.getContext('2d');
+    const img = ctx.createImageData(cols, rows);
+    for (let y = 0; y < rows; y++) {
+      for (let x = 0; x < cols; x++) {
+        const px = x0 + (x + 0.5) * cell, pz = z0 + (y + 0.5) * cell;
+        let best = -200;
+        for (const ap of aps) best = Math.max(best, net.rssiAt(ap, px, pz));
+        const [R, G, B] = heatCol(best), i = (y * cols + x) * 4;
+        img.data[i] = R; img.data[i + 1] = G; img.data[i + 2] = B;
+        img.data[i + 3] = best < -80 ? (faint ? 0 : 90) : 165;
+      }
+    }
+    ctx.putImageData(img, 0, 0);
+    const m = new THREE.Mesh(new THREE.PlaneGeometry(cols * cell, rows * cell), new THREE.MeshBasicMaterial({ map: new THREE.CanvasTexture(c), transparent: true, opacity: 0.62, depthWrite: false }));
+    m.rotation.x = -Math.PI / 2;
+    m.position.set(x0 + cols * cell / 2, 0.06, z0 + rows * cell / 2);
+    m.renderOrder = 4;
+    return m;
   }
   function drawHeat() {
     clearHeat();
@@ -52,27 +75,19 @@
     heat.sig = heatSig();
     if (!aps.length) return;
     const { w, l } = roomSize();
-    const cell = Math.max(0.12, Math.max(w, l) / 150);
-    const cols = Math.ceil(w / cell), rows = Math.ceil(l / cell);
-    const c = document.createElement('canvas');
-    c.width = cols; c.height = rows;
-    const ctx = c.getContext('2d');
-    const img = ctx.createImageData(cols, rows);
-    const col = r => r >= -55 ? [34, 197, 94] : r >= -67 ? [132, 204, 22] : r >= -75 ? [250, 204, 21] : r >= -80 ? [249, 115, 22] : [239, 68, 68];
-    for (let y = 0; y < rows; y++) {
-      for (let x = 0; x < cols; x++) {
-        const px = -w / 2 + (x + 0.5) * cell, pz = -l / 2 + (y + 0.5) * cell;
-        let best = -200;
-        for (const ap of aps) best = Math.max(best, net.rssiAt(ap, px, pz));
-        const [R, G, B] = col(best), i = (y * cols + x) * 4;
-        img.data[i] = R; img.data[i + 1] = G; img.data[i + 2] = B;
-        img.data[i + 3] = best < -80 ? 90 : 165;
-      }
+    if (Math.max(w, l) > 140) {
+      // ผังบริเวณกว้าง: คำนวณเฉพาะรอบ ๆ แต่ละ Access Point (ละเอียดกว่าและเร็วกว่าทั้งผัง)
+      const R = 60, grp = new THREE.Group();
+      aps.forEach(ap => {
+        const near = aps.filter(o => Math.hypot((o.x || 0) - (ap.x || 0), (o.z || 0) - (ap.z || 0)) < R * 2);
+        grp.add(heatTile(near, (ap.x || 0) - R, (ap.z || 0) - R, R * 2, R * 2, 0.8, true));
+      });
+      heat.mesh = grp;
+      scene.add(grp);
+      return;
     }
-    ctx.putImageData(img, 0, 0);
-    const tex = new THREE.CanvasTexture(c);
-    heat.mesh = new THREE.Mesh(new THREE.PlaneGeometry(w, l), new THREE.MeshBasicMaterial({ map: tex, transparent: true, opacity: 0.62, depthWrite: false }));
-    heat.mesh.rotation.x = -Math.PI / 2;
+    const cell = Math.max(0.12, Math.max(w, l) / 150);
+    heat.mesh = heatTile(aps, -w / 2, -l / 2, w, l, cell, false);
     heat.mesh.position.y = 0.016;
     heat.mesh.renderOrder = 2;
     scene.add(heat.mesh);

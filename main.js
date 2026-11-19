@@ -164,20 +164,10 @@
       requestAnimationFrame(step);
     });
   }
-  // หยุดเล่นเมื่อแผนผังไม่อยู่บนจอ เพื่อไม่ให้เครื่องทำงานเปล่าๆ (มือถือจะลื่นขึ้น)
-  let topoOnScreen = true, resumeTopo = null;
-  if ('IntersectionObserver' in window) {
-    new IntersectionObserver(([e]) => {
-      topoOnScreen = e.isIntersecting;
-      if (topoOnScreen && resumeTopo) { resumeTopo(); resumeTopo = null; }
-    }).observe(svg);
-  }
-  const whenTopoVisible = () => (topoOnScreen ? null : new Promise(r => { resumeTopo = r; }));
   async function playStory() {
     if (UI.reduced) { setCaption(STORY[4][0], STORY[4][1]); return; }
     for (;;) {
       for (const [proto, text, hops] of STORY) {
-        await whenTopoVisible();
         setCaption(proto, text);
         await Promise.all(hops.map(hp => fly(hp, COLORS[proto], 900)));
         await UI.wait(650);
@@ -289,23 +279,6 @@
   }
   $('newProjectBtn').onclick = () => openProjectDialog();
   $('exploreBtn').onclick = () => $('labs').scrollIntoView({ behavior: UI.reduced ? 'auto' : 'smooth' });
-  // แชร์ลิงก์หน้าหลัก: คนที่เปิดลิงก์จะเข้าเป็นผู้เยี่ยมชมได้ทันที (ต้องเปิดเว็บผ่าน http/https เช่น GitHub Pages)
-  $('shareBtn').onclick = async () => {
-    const url = new URL('index.html', location.href);
-    url.search = Store.config.allowGuest ? '?guest=1' : '';
-    url.hash = '';
-    const link = url.href;
-    if (navigator.share) {
-      try { await navigator.share({ title: document.title, url: link }); return; }
-      catch (e) { if (e && e.name === 'AbortError') return; }
-    }
-    try {
-      await navigator.clipboard.writeText(link);
-      UI.toast('คัดลอกลิงก์แล้ว ส่งให้คนอื่นเปิดได้เลย', 'ok');
-    } catch (e) {
-      window.prompt('คัดลอกลิงก์นี้ไปแชร์', link);
-    }
-  };
   $('projectForm').addEventListener('submit', async e => {
     e.preventDefault();
     const name = $('projectName').value.trim();
@@ -499,10 +472,6 @@
     }
   }
   buildOrbit();
-  if ('IntersectionObserver' in window) {
-    const orbit = $('orbit');
-    new IntersectionObserver(([e]) => orbit.classList.toggle('is-off', !e.isIntersecting)).observe(orbit);
-  }
 
   /* ------------------ กระจก: ประกายแสงตามเมาส์ + การ์ดเอียง 3D ------------------ */
   const canHover = window.matchMedia('(hover: hover)').matches && !UI.reduced;
